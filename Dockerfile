@@ -12,6 +12,7 @@ RUN go build -o ./bin/cacher ./cmd/cacher/
 
 FROM alpine
 WORKDIR /app
+VOLUME /cache
 COPY --from=0 /app/bin/cacher /app/cacher
 ADD .env /app/.env
 CMD /app/cacher

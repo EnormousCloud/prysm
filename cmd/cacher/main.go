@@ -2,119 +2,155 @@ package main
 
 import (
 	"beaconchain/rpc"
-	"beaconchain/types"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
-func workerA(client *rpc.PrysmClient, epoch uint64) {
-	start := time.Now()
-	key := fmt.Sprintf("res/e%08x.a", epoch)
-	if client.Storage.Has(key) {
-		fmt.Printf("[skip] worker A%v, took %s\n", epoch, time.Since(start))
-		return
-	}
-	res, err := client.GetEpochAssignments(epoch)
-	if err != nil {
-		log.Println("[a] error: ", err)
-	}
-	out, _ := json.Marshal(res)
-	if err := client.Storage.Set(key, out); err != nil {
-		log.Println("[warn]", err)
-	}
-	fmt.Printf("[done] worker A%v in %s\n", epoch, time.Since(start))
+type clients struct {
+	index int
+	list  []*rpc.PrysmClient
+	hosts []string
 }
 
-func workerB(client *rpc.PrysmClient, epoch uint64) {
-	start := time.Now()
-	key := fmt.Sprintf("res/e%08x.b", epoch)
-	if client.Storage.Has(key) {
-		fmt.Printf("[skip] worker B%v, took %s\n", epoch, time.Since(start))
-		return
-	}
-	res, err := client.GetBalancesForEpoch(int64(epoch))
-	if err != nil {
-		log.Println("[b] error: ", err)
-	}
-	out, _ := json.Marshal(res)
-	if err := client.Storage.Set(key, out); err != nil {
-		log.Println("[warn]", err)
-	}
-	fmt.Printf("[done] worker B%v, took %s\n", epoch, time.Since(start))
+func (s *clients) Get() *rpc.PrysmClient {
+	return s.list[s.index]
 }
 
-func workerS(client *rpc.PrysmClient, epoch uint64) {
-	start := time.Now()
-	key := fmt.Sprintf("res/e%08x.s", epoch)
-	if client.Storage.Has(key) {
-		fmt.Printf("[skip] worker S%v, took %s\n", epoch, time.Since(start))
-		return
-	}
+func (s *clients) Len() int {
+	return len(s.hosts)
+}
 
-	slots := map[uint64][]*types.Block{}
-	for slot := epoch*32 + 1; slot <= (epoch+1)*32; slot++ {
-		val, err := client.GetBlocksBySlot(slot)
+func (s *clients) Next() *rpc.PrysmClient {
+	s.index = (s.index + 1) % len(s.list)
+	log.Printf("switched to %v\n", s.hosts[s.index])
+	return s.Get()
+}
+
+func NewClients(hosts []string) (*clients, error) {
+	s := &clients{
+		index: 0,
+		list:  make([]*rpc.PrysmClient, 0),
+		hosts: hosts,
+	}
+	for _, host := range hosts {
+		log.Printf("connecting to RPC of %v\n", host)
+		client, err := rpc.NewPrysmClient(host)
 		if err != nil {
-			log.Println("[a] error: ", err, "slot", slot)
-			continue
+			log.Printf("error connecting to %v: %v\n", host, err)
+		} else {
+			s.list = append(s.list, client)
 		}
-		slots[slot] = val
 	}
-	out, _ := json.Marshal(slots)
-	if err := client.Storage.Set(key, out); err != nil {
-		log.Println("[warn]", err)
+	if len(s.list) == 0 {
+		return nil, errors.New("no Prysm clients to connect")
 	}
-	fmt.Printf("[done] worker S%v, took %s\n", epoch, time.Since(start))
+	return s, nil
 }
+
+var hosts = flag.String("hosts", "localhost:4000", "comma-separated list of hosts to connect to")
+var gethead = flag.Bool("get-head", false, "return head of")
+var head = flag.Int("head", 0, "block to start reading")
+var limit = flag.Int("limit", 1000, "max number of epochs to look at")
+var debug = flag.Bool("debug", false, "do some debugging instead of the job")
 
 func main() {
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
-	cacher, err := rpc.NewStorage()
-	if err != nil {
-		log.Fatal(err)
-	}
-	client, err := rpc.NewPrysmClient("localhost:4000", cacher)
-	if err != nil {
-		log.Fatal(err)
-	}
-	head, err := client.GetChainHead()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("chain head epoch", head.HeadEpoch)
+	flag.Parse()
 
-	// wg := sync.WaitGroup{}
-	chA := make(chan int, 2)
-	chB := make(chan int, 2)
-	chS := make(chan int, 2)
-	go func() {
-		for eA := range chA {
-			workerA(client, uint64(eA))
+	if *gethead {
+		client, err := rpc.NewPrysmClient(*hosts)
+		if err != nil {
+			log.Fatal(err)
 		}
-	}()
-	go func() {
-		for eB := range chB {
-			workerB(client, uint64(eB))
+		head, err := client.GetChainHead()
+		if err != nil {
+			log.Fatal(err)
 		}
-	}()
-	go func() {
-		for eS := range chS {
-			workerS(client, uint64(eS))
-		}
-	}()
-
-	for epoch := 1; epoch < int(head.HeadEpoch); epoch++ {
-		// fmt.Println("[queued] epoch", epoch)
-		chA <- epoch
-		chB <- epoch
-		chS <- epoch
+		fmt.Print(head.HeadEpoch)
+		os.Exit(0)
 	}
-	close(chA)
+	clients, err := NewClients(strings.Split(*hosts, ","))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if *debug {
+		epoch := uint64(801)
+		out, err := clients.Get().GetEpochAssignments(epoch)
+		if err != nil {
+			log.Fatal(err)
+		}
+		outjson, _ := json.MarshalIndent(out, "", "  ")
+		// s := rpc.NewAssignments(epoch, out)
+		// b, _ := json.MarshalIndent(s.Get(), "", "  ")
+
+		// if string(outjson) != string(b) {
+		// 	log.Fatal("codec strings mismatch")
+		// }
+		// log.Println("codec strings full match")
+		rpc.SaveAssignmentsMaps(epoch, out)
+		out2, err := rpc.LoadAssignmentsMaps(epoch)
+		if err != nil {
+			log.Fatal(err)
+		}
+		b, _ := json.MarshalIndent(out2, "", "  ")
+		if string(outjson) != string(b) {
+			log.Fatal("codec strings mismatch")
+		}
+		log.Println("codec strings full match")
+		fmt.Println(string(b))
+		os.Exit(0)
+	}
+
+	headEpoch := *head
+	if headEpoch == 0 {
+		head, err := clients.Get().GetChainHead()
+		if err != nil {
+			log.Fatal(err)
+		}
+		headEpoch = int(head.HeadEpoch)
+		fmt.Println("chain head epoch", head.HeadEpoch)
+	}
+
+	i := 0
+	failures := map[uint64]int{}
+	for {
+		start := time.Now()
+
+		epoch := uint64(int(headEpoch) - i)
+		// _, err := clients.Get().GetBalancesForEpoch(epoch)
+		_, err := clients.Get().GetEpochAssignments(epoch)
+		if err != nil {
+			if _, ok := failures[epoch]; !ok {
+				failures[epoch] = 0
+			}
+			failures[epoch] += 1
+			log.Printf("epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
+			if failures[epoch] < clients.Len() {
+				// try again on other server, otherwise skip
+				clients.Next()
+			} else {
+				i++            // all hosts were requested, just skip to the next epoch
+				clients.Next() // switch anyway to a better server
+			}
+			continue
+		}
+		log.Printf("epoch %d took %v\n", epoch, time.Since(start))
+
+		i++
+		if i >= *limit || (int(headEpoch)-i) == 0 {
+			break
+		}
+	}
 }

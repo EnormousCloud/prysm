@@ -4,6 +4,7 @@ import (
 	"beaconchain/types"
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -27,7 +28,6 @@ type PrysmClient struct {
 	assignmentsCache    *lru.Cache
 	assignmentsCacheMux *sync.Mutex
 	newBlockChan        chan *types.Block
-	Storage             IStorage
 }
 
 // FormatAttestorAssignmentKey will format attestor assignment keys
@@ -36,7 +36,7 @@ func FormatAttestorAssignmentKey(AttesterSlot, CommitteeIndex, MemberIndex uint6
 }
 
 // NewPrysmClient is used for a new Prysm client connection
-func NewPrysmClient(endpoint string, storage IStorage) (*PrysmClient, error) {
+func NewPrysmClient(endpoint string) (*PrysmClient, error) {
 	dialOpts := []grpc.DialOption{
 		grpc.WithInsecure(),
 		// Maximum receive value 128 MB
@@ -51,14 +51,13 @@ func NewPrysmClient(endpoint string, storage IStorage) (*PrysmClient, error) {
 	chainClient := ethpb.NewBeaconChainClient(conn)
 	nodeClient := ethpb.NewNodeClient(conn)
 
-	logger.Printf("gRPC connection to backend node established")
+	// logger.Printf("gRPC connection to backend node established")
 	client := &PrysmClient{
 		client:              chainClient,
 		nodeClient:          nodeClient,
 		conn:                conn,
 		assignmentsCacheMux: &sync.Mutex{},
 		newBlockChan:        make(chan *types.Block, 1000),
-		Storage:             storage,
 	}
 	client.assignmentsCache, _ = lru.New(10)
 	return client, nil
@@ -194,6 +193,15 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.EpochAssignment
 		return cachedValue.(*types.EpochAssignments), nil
 	}
 
+	// if HasAssignments(epoch) {
+	// 	r, err := LoadAssignmentsMaps(epoch)
+	// 	if err == nil {
+	// 		fmt.Printf("Loaded epoch %d assignments %v proposers, %v keys\n",
+	// 			epoch, len(r.ProposerAssignments), len(r.AttestorAssignments))
+	// 	}
+	// 	return r, err
+	// }
+
 	logger.Infof("caching assignements for epoch %v", epoch)
 	start := time.Now()
 	assignments := &types.EpochAssignments{
@@ -214,6 +222,22 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.EpochAssignment
 	for {
 		validatorAssignmentRequest.PageToken = validatorAssignmentResponse.NextPageToken
 		validatorAssignmentResponse, err = pc.client.ListValidatorAssignments(context.Background(), validatorAssignmentRequest)
+
+		// pbstr, _ := json.MarshalIndent(validatorAssignmentResponse, "", "  ")
+		// fmt.Println("", string(pbstr))
+		since := time.Now()
+		SaveAssignmentsPB(epoch, validatorAssignmentResponse)
+		log.Printf("gzip encoded epoch %v took %v", epoch, time.Since(since))
+
+		// since = time.Now()
+		// dec := gob.NewDecoder(bytes.NewReader(bb.Bytes())) // Will read
+		// var out ethpb.ValidatorAssignments
+		// err = dec.Decode(&out)
+		// if err != nil {
+		// 	log.Fatal(err)
+		// }
+		// log.Printf("decoded, took %v", time.Since(since))
+
 		if err != nil {
 			return nil, fmt.Errorf("error retrieving validator assignment response for caching: %v", err)
 		}
@@ -244,6 +268,15 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.EpochAssignment
 	}
 
 	logger.Infof("cached assignements for epoch %v took %v", epoch, time.Since(start))
+
+	// if len(assignments.ProposerAssignments) > 0 && len(assignments.AttestorAssignments) > 0 {
+	// 	now := time.Now()
+	// 	SaveAssignmentsMaps(epoch, assignments)
+	// 	fmt.Printf("Saved assignments of epoch %d: %v proposers, %v keys; encoding took %v\n",
+	// 		epoch, len(assignments.ProposerAssignments), len(assignments.AttestorAssignments),
+	// 		time.Since(now))
+	// }
+
 	return assignments, nil
 }
 
@@ -409,6 +442,19 @@ func (pc *PrysmClient) GetBalancesForEpoch(epoch int64) (map[uint64]uint64, erro
 		epoch = 0
 	}
 
+	if HasBalances(epoch) {
+		r, err := LoadBalances(epoch)
+		if err == nil {
+			sum := uint64(0)
+			for _, v := range r {
+				sum = sum + v
+			}
+			fmt.Printf("Loaded epoch %d totals %v\n", epoch, sum)
+		}
+		return r, err
+	}
+
+	// if there is a local file with array of uint64, load it
 	var err error
 
 	validatorBalances := make(map[uint64]uint64)
@@ -439,6 +485,14 @@ func (pc *PrysmClient) GetBalancesForEpoch(epoch int64) (map[uint64]uint64, erro
 		if validatorBalancesResponse.NextPageToken == "" {
 			break
 		}
+	}
+	if len(validatorBalances) > 0 {
+		sum := uint64(0)
+		for _, v := range validatorBalances {
+			sum = sum + v
+		}
+		fmt.Printf("Saved epoch %d totals: %v\n", epoch, sum)
+		SaveBalances(epoch, validatorBalances)
 	}
 	return validatorBalances, err
 }
