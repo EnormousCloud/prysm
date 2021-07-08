@@ -2,17 +2,18 @@ package main
 
 import (
 	"beaconchain/rpc"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/sirupsen/logrus"
 )
+
+var logger = logrus.New().WithField("module", "cacher")
 
 type clients struct {
 	index int
@@ -30,7 +31,7 @@ func (s *clients) Len() int {
 
 func (s *clients) Next() *rpc.PrysmClient {
 	s.index = (s.index + 1) % len(s.list)
-	log.Printf("switched to %v\n", s.hosts[s.index])
+	logger.Printf("switched to %v\n", s.hosts[s.index])
 	return s.Get()
 }
 
@@ -41,10 +42,10 @@ func NewClients(hosts []string) (*clients, error) {
 		hosts: hosts,
 	}
 	for _, host := range hosts {
-		log.Printf("connecting to RPC of %v\n", host)
+		logger.Printf("connecting to RPC of %v\n", host)
 		client, err := rpc.NewPrysmClient(host)
 		if err != nil {
-			log.Printf("error connecting to %v: %v\n", host, err)
+			logger.Printf("error connecting to %v: %v\n", host, err)
 		} else {
 			s.list = append(s.list, client)
 		}
@@ -60,97 +61,137 @@ var gethead = flag.Bool("get-head", false, "return head of")
 var head = flag.Int("head", 0, "block to start reading")
 var limit = flag.Int("limit", 1000, "max number of epochs to look at")
 var debug = flag.Bool("debug", false, "do some debugging instead of the job")
+var inc = flag.Bool("inc", false, "do through epochs incrementally")
+
+var cacheBalances = flag.Bool("balances", true, "cache balances")
+var cacheAssignments = flag.Bool("assignments", true, "cacne assignmenets")
 
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		logger.Fatal("Error loading .env file")
 	}
 	flag.Parse()
 
 	if *gethead {
 		client, err := rpc.NewPrysmClient(*hosts)
 		if err != nil {
-			log.Fatal(err)
+			logger.Fatal(err)
 		}
 		head, err := client.GetChainHead()
 		if err != nil {
-			log.Fatal(err)
+			logger.Fatal(err)
 		}
 		fmt.Print(head.HeadEpoch)
 		os.Exit(0)
 	}
 	clients, err := NewClients(strings.Split(*hosts, ","))
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 
 	if *debug {
-		epoch := uint64(801)
-		out, err := clients.Get().GetEpochAssignments(epoch)
-		if err != nil {
-			log.Fatal(err)
-		}
-		outjson, _ := json.MarshalIndent(out, "", "  ")
-		// s := rpc.NewAssignments(epoch, out)
-		// b, _ := json.MarshalIndent(s.Get(), "", "  ")
+		// epoch := uint64(49050)
+		// pb, err := rpc.LoadAssignmentsPB(epoch)
+		// if err != nil {
+		// 	logger.Fatal(err)
+		// }
+		// out := rpc.NewAssignmentsFromPB(epoch, pb)
+		// rpc.SaveAssignments(epoch, out)
 
-		// if string(outjson) != string(b) {
+		// pbjson, _ := json.MarshalIndent(pb, "", "  ")
+		// outjson, _ := json.MarshalIndent(out, "", "  ")
+		// if string(outjson) != string(outjson1) {
 		// 	log.Fatal("codec strings mismatch")
 		// }
-		// log.Println("codec strings full match")
-		rpc.SaveAssignmentsMaps(epoch, out)
-		out2, err := rpc.LoadAssignmentsMaps(epoch)
-		if err != nil {
-			log.Fatal(err)
-		}
-		b, _ := json.MarshalIndent(out2, "", "  ")
-		if string(outjson) != string(b) {
-			log.Fatal("codec strings mismatch")
-		}
-		log.Println("codec strings full match")
-		fmt.Println(string(b))
+		// // log.Println("codec strings full match")
+		// fmt.Println(string(outjson))
 		os.Exit(0)
 	}
 
+	estHeadEpoch := 0
 	headEpoch := *head
 	if headEpoch == 0 {
 		head, err := clients.Get().GetChainHead()
 		if err != nil {
-			log.Fatal(err)
+			logger.Fatal(err)
 		}
 		headEpoch = int(head.HeadEpoch)
-		fmt.Println("chain head epoch", head.HeadEpoch)
+		estHeadEpoch = int(head.HeadEpoch)
+		logger.Println("chain head epoch", head.HeadEpoch)
 	}
 
+	sign := -1
+	if *inc {
+		sign = 1
+		if estHeadEpoch == 0 {
+			head, err := clients.Get().GetChainHead()
+			if err != nil {
+				logger.Fatal(err)
+			}
+			estHeadEpoch = int(head.HeadEpoch)
+		}
+	}
 	i := 0
 	failures := map[uint64]int{}
 	for {
 		start := time.Now()
+		cont := false
+		epoch := uint64(int(headEpoch) + i*sign)
 
-		epoch := uint64(int(headEpoch) - i)
-		// _, err := clients.Get().GetBalancesForEpoch(epoch)
-		_, err := clients.Get().GetEpochAssignments(epoch)
-		if err != nil {
-			if _, ok := failures[epoch]; !ok {
-				failures[epoch] = 0
+		if *cacheBalances {
+			_, err := clients.Get().GetBalancesForEpoch(int64(epoch))
+			if err != nil {
+				if _, ok := failures[epoch]; !ok {
+					failures[epoch] = 0
+				}
+				failures[epoch] += 1
+				logger.Printf("epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
+				if failures[epoch] < clients.Len() {
+					// try again on other server, otherwise skip
+					clients.Next()
+				} else {
+					i++            // all hosts were requested, just skip to the next epoch
+					clients.Next() // switch anyway to a better server
+				}
+				cont = true
 			}
-			failures[epoch] += 1
-			log.Printf("epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
-			if failures[epoch] < clients.Len() {
-				// try again on other server, otherwise skip
-				clients.Next()
-			} else {
-				i++            // all hosts were requested, just skip to the next epoch
-				clients.Next() // switch anyway to a better server
+		}
+
+		if *cacheAssignments {
+			_, err := clients.Get().GetEpochAssignments(epoch)
+			if err != nil {
+				if _, ok := failures[epoch]; !ok {
+					failures[epoch] = 0
+				}
+				failures[epoch] += 1
+				logger.Printf("epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
+				if failures[epoch] < clients.Len() {
+					// try again on other server, otherwise skip
+					clients.Next()
+				} else {
+					i++            // all hosts were requested, just skip to the next epoch
+					clients.Next() // switch anyway to a better server
+				}
+				cont = true
 			}
+		}
+		if cont {
 			continue
 		}
-		log.Printf("epoch %d took %v\n", epoch, time.Since(start))
+		logger.Printf("epoch %d took %v \n", epoch, time.Since(start))
 
 		i++
-		if i >= *limit || (int(headEpoch)-i) == 0 {
-			break
+		nextEpoch := int(headEpoch) + sign*i
+		if sign > 0 {
+			logger.Printf("epoch %d took %v, est head %v \n", epoch, time.Since(start), estHeadEpoch)
+			if i >= *limit || nextEpoch > estHeadEpoch {
+				break
+			}
+		} else {
+			if i >= *limit || nextEpoch == 0 {
+				break
+			}
 		}
 	}
 }

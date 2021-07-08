@@ -10,15 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
-	"strconv"
-	"strings"
 	"time"
+
+	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
+	"github.com/sirupsen/logrus"
 )
 
+var logassignments = logrus.New().WithField("module", "assignments")
+
 func FnAssignments(epoch uint64) string {
-	return fmt.Sprintf("/cache/%d.assign", epoch)
+	return fmt.Sprintf("/cache/%d.assign.gz", epoch)
 }
 
 func HasAssignments(epoch uint64) bool {
@@ -37,106 +39,73 @@ func HasAssignments(epoch uint64) bool {
 	return true
 }
 
-type AssignmentSlot struct {
-	Proposer  uint64
-	Commitees [][]uint64
-}
-
-type Assignments struct {
-	// Number of epoch
-	Epoch uint32
-	// typically 32
-	NumSlots uint32
-	// First slot in the epoch
-	FirstSlot   uint64
-	Assignments []AssignmentSlot
-}
-
-func (a *Assignments) ToMaps() *types.EpochAssignments {
-	proposers := map[uint64]uint64{}
-	attestors := map[string]uint64{}
-	for slotIndex, assignment := range a.Assignments {
-		proposers[uint64(slotIndex)+a.FirstSlot] = assignment.Proposer
-		for ci, members := range assignment.Commitees {
-			for mi, member := range members {
-				key := fmt.Sprintf("%d-%d-%d", uint64(slotIndex)+a.FirstSlot, ci, mi)
-				attestors[key] = member
-			}
-		}
-	}
-	return &types.EpochAssignments{
-		ProposerAssignments: proposers,
-		AttestorAssignments: attestors,
-	}
-}
-
-func unpackAssignmentKey(str string) (AttesterSlot uint64, CommitteeIndex uint64, MemberIndex uint64) {
-	x := strings.Split(str, "-")
-	AttesterSlot, _ = strconv.ParseUint(x[0], 10, 64)
-	CommitteeIndex, _ = strconv.ParseUint(x[1], 10, 64)
-	MemberIndex, _ = strconv.ParseUint(x[2], 10, 64)
-	return
-}
-
-func NewAssignmentsFromMaps(epoch uint64, src *types.EpochAssignments) Assignments {
+func NewAssignmentsFromPB(epoch uint64, src *ethpb.ValidatorAssignments) *types.Assignments {
 	since := time.Now()
+	proposers := map[uint64]uint64{}
+	slotsz := map[uint64]uint64{}
 	firstSlot := uint64(0)
-	for k, _ := range src.ProposerAssignments {
-		if firstSlot == 0 || k < firstSlot {
-			firstSlot = k
+
+	// loop 1 - define sizes for allocations
+	for i := 0; i < len(src.Assignments); i++ {
+		assignment := src.Assignments[i]
+
+		if len(assignment.ProposerSlots) > 0 {
+			slot := uint64(assignment.ProposerSlots[0])
+			if slot < firstSlot || firstSlot == 0 {
+				firstSlot = slot
+			}
+			proposer := uint64(assignment.ValidatorIndex)
+			proposers[uint64(slot)] = proposer
+			// log.Printf("%d ProposerSlots: %v %v", i, slot, proposer)
+		}
+		slot := uint64(assignment.AttesterSlot)
+		if slot < firstSlot || firstSlot == 0 {
+			firstSlot = slot
+		}
+
+		if val, ok := slotsz[slot]; ok {
+			if val < uint64(assignment.CommitteeIndex) {
+				slotsz[slot] = uint64(assignment.CommitteeIndex)
+			}
+		} else {
+			slotsz[slot] = uint64(assignment.CommitteeIndex)
 		}
 	}
-	assignments := make([]AssignmentSlot, len(src.ProposerAssignments), len(src.ProposerAssignments))
-	for slot, proposer := range src.ProposerAssignments {
-		slotIndex := slot - firstSlot
-		slotStart := time.Now()
-
-		numCommitee := uint64(0)
-		for key, _ := range src.AttestorAssignments {
-			AttesterSlot, CommiteeIndex, _ := unpackAssignmentKey(key)
-			if AttesterSlot == slot && numCommitee < CommiteeIndex+1 {
-				numCommitee = CommiteeIndex + 1
-			}
+	// fmt.Printf("slotsz %v proposers: %v", slotsz, proposers)
+	// step 2 - allocation
+	assignments := make([]types.AssignmentSlot, uint32(len(slotsz)))
+	for slot, maxCommitteeIndex := range slotsz {
+		slotIndex := uint64(slot) - firstSlot
+		assignments[slotIndex] = types.AssignmentSlot{
+			Proposer:   proposers[uint64(slot)],
+			Committees: make([][]uint64, uint64(maxCommitteeIndex)+1),
 		}
-		// size of commitee was defined
-		commitees := make([][]uint64, numCommitee)
-		for ci := uint64(0); ci < numCommitee; ci++ {
-			// log.Printf("Encoding assignments slot %v commitee %v out of %v", slot, ci, numCommitee)
-			numMembers := uint64(0)
-			for key, _ := range src.AttestorAssignments {
-				AttesterSlot, CommiteeIndex, MemberIndex := unpackAssignmentKey(key)
-				if AttesterSlot == slot && CommiteeIndex == ci && numMembers < MemberIndex+1 {
-					numMembers = MemberIndex + 1
-				}
-			}
-			members := make([]uint64, numMembers)
-			for key, member := range src.AttestorAssignments {
-				AttesterSlot, CommiteeIndex, MemberIndex := unpackAssignmentKey(key)
-				if AttesterSlot == slot && CommiteeIndex == ci {
-					members[MemberIndex] = member
-				}
-			}
-			commitees[ci] = members
-		}
-
-		assignments[slotIndex] = AssignmentSlot{
-			Proposer:  proposer,
-			Commitees: commitees,
-		}
-
-		log.Printf("Encoding assignments slot %v took %v", slot, time.Since(slotStart))
 	}
 
-	log.Printf("Encoding assignments for epoch %v took %v", epoch, time.Since(since))
-	return Assignments{
-		Epoch:       uint32(epoch),
-		FirstSlot:   firstSlot,
-		NumSlots:    uint32(len(src.ProposerAssignments)),
-		Assignments: assignments,
+	for i := 0; i < len(src.Assignments); i++ {
+		assignment := src.Assignments[i]
+		slotIndex := uint64(assignment.AttesterSlot) - firstSlot
+		m := make([]uint64, len(assignment.BeaconCommittees))
+		for k := 0; k < len(assignment.BeaconCommittees); k++ {
+			m[k] = uint64(assignment.BeaconCommittees[k])
+		}
+		assignments[slotIndex].Committees[assignment.CommitteeIndex] = m
+	}
+
+	logassignments.Printf("encoding from PB for epoch %v starting from slot %v took %v",
+		epoch, firstSlot, time.Since(since))
+	// log.Printf("max committee index: %v", assignments)
+
+	return &types.Assignments{
+		Epoch:          uint32(epoch),
+		FirstSlot:      firstSlot,
+		NumSlots:       uint32(len(proposers)),
+		NumAssignments: uint64(len(src.Assignments)),
+		Assignments:    assignments,
 	}
 }
 
-func LoadAssignmentsMaps(epoch uint64) (*types.EpochAssignments, error) {
+func LoadAssignments(epoch uint64) (*types.Assignments, error) {
 	file, err := os.Open(FnAssignments(epoch))
 	if err != nil {
 		return nil, err
@@ -169,22 +138,24 @@ func LoadAssignmentsMaps(epoch uint64) (*types.EpochAssignments, error) {
 		return nil, err
 	}
 	dec := gob.NewDecoder(bytes.NewReader(bb2.Bytes())) // Will read
-	var out Assignments
+	var out types.Assignments
 	err = dec.Decode(&out)
 	if err != nil {
 		return nil, err
 	}
-	return out.ToMaps(), nil
+	return &out, nil
 }
 
-func SaveAssignmentsMaps(epoch uint64, src *types.EpochAssignments) error {
+func SaveAssignments(epoch uint64, src *types.Assignments) error {
+	// start := time.Now()
+
 	if src == nil || epoch <= 0 {
 		return nil
 	}
 
 	var bb bytes.Buffer        // Stand-in for a network connection
 	enc := gob.NewEncoder(&bb) // Will write to network.
-	err := enc.Encode(NewAssignmentsFromMaps(epoch, src))
+	err := enc.Encode(src)
 	if err != nil {
 		return err
 	}
@@ -199,5 +170,7 @@ func SaveAssignmentsMaps(epoch uint64, src *types.EpochAssignments) error {
 	if err := binary.Write(gz, binary.LittleEndian, bb.Bytes()); err != nil {
 		return err
 	}
-	return gz.Close()
+	defer gz.Close()
+	// logassignments.Printf("saving of epoch %v took %v", epoch, time.Since(start))
+	return nil
 }

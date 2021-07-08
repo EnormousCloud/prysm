@@ -9,7 +9,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/sirupsen/logrus"
 )
+
+var logbalances = logrus.New().WithField("module", "balances")
 
 func FnBalances(epoch int64) string {
 	return fmt.Sprintf("/cache/%d.balances.gz", epoch)
@@ -60,7 +64,7 @@ func LoadBalances(epoch int64) (map[uint64]uint64, error) {
 
 	bb2 := new(bytes.Buffer)
 	sz, err := io.Copy(bb2, zr)
-	fmt.Printf("balances of %d validators from cache of epoch %d\n", sz/8, epoch)
+	logbalances.Printf("balances of %d validators from cache of epoch %d\n", sz/8, epoch)
 	ints := make([]uint64, sz/8)
 	err = binary.Read(bytes.NewReader(bb2.Bytes()), binary.LittleEndian, ints)
 	if err != nil {

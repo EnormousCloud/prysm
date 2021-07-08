@@ -3,8 +3,8 @@ package rpc
 import (
 	"beaconchain/types"
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -18,7 +18,7 @@ import (
 	eth2types "github.com/prysmaticlabs/eth2-types"
 )
 
-var logger = logrus.New().WithField("module", "prysm")
+var logger = logrus.New().WithField("module", "rpc")
 
 // PrysmClient holds information about the Prysm Client
 type PrysmClient struct {
@@ -28,11 +28,6 @@ type PrysmClient struct {
 	assignmentsCache    *lru.Cache
 	assignmentsCacheMux *sync.Mutex
 	newBlockChan        chan *types.Block
-}
-
-// FormatAttestorAssignmentKey will format attestor assignment keys
-func FormatAttestorAssignmentKey(AttesterSlot, CommitteeIndex, MemberIndex uint64) string {
-	return fmt.Sprintf("%v-%v-%v", AttesterSlot, CommitteeIndex, MemberIndex)
 }
 
 // NewPrysmClient is used for a new Prysm client connection
@@ -181,103 +176,66 @@ func (pc *PrysmClient) GetAttestationPool() ([]*types.Attestation, error) {
 }
 
 // GetEpochAssignments will get the epoch assignments from a Prysm client
-func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.EpochAssignments, error) {
-
+func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.Assignments, error) {
 	pc.assignmentsCacheMux.Lock()
 	defer pc.assignmentsCacheMux.Unlock()
 
-	var err error
-
 	cachedValue, found := pc.assignmentsCache.Get(epoch)
 	if found {
-		return cachedValue.(*types.EpochAssignments), nil
+		return cachedValue.(*types.Assignments), nil
 	}
 
-	// if HasAssignments(epoch) {
-	// 	r, err := LoadAssignmentsMaps(epoch)
-	// 	if err == nil {
-	// 		fmt.Printf("Loaded epoch %d assignments %v proposers, %v keys\n",
-	// 			epoch, len(r.ProposerAssignments), len(r.AttestorAssignments))
-	// 	}
-	// 	return r, err
-	// }
+	var err error
 
-	logger.Infof("caching assignements for epoch %v", epoch)
+	if HasAssignments(epoch) {
+		out, err := LoadAssignments(epoch)
+		if err == nil {
+			logger.Printf("Loaded epoch %d assignments, %v slots %v assignments\n",
+				epoch, len(out.Assignments), out.NumAssignments)
+			pc.assignmentsCache.Add(epoch, out)
+			return out, nil
+		} else {
+			logger.Println("LoadAssignments failure", err)
+		}
+	} else if HasAssignmentsPB(epoch) {
+		pb, err := LoadAssignmentsPB(epoch)
+		if err == nil {
+			out := NewAssignmentsFromPB(epoch, pb)
+			logger.Printf("Loaded epoch %d assignments from PB, %v slots %v assignments\n",
+				epoch, len(out.Assignments), out.NumAssignments)
+			pc.assignmentsCache.Add(epoch, out)
+			return out, nil
+		} else {
+			logger.Println("LoadAssignmentsPB failure", err)
+		}
+	}
+
+	logger.Infof("caching assignments for epoch %v", epoch)
 	start := time.Now()
-	assignments := &types.EpochAssignments{
-		ProposerAssignments: make(map[uint64]uint64),
-		AttestorAssignments: make(map[string]uint64),
-	}
 
 	// Retrieve the validator assignments for the epoch
-	validatorAssignmentes := make([]*ethpb.ValidatorAssignments_CommitteeAssignment, 0)
-	validatorAssignmentResponse := &ethpb.ValidatorAssignments{}
-	validatorAssignmentRequest := &ethpb.ListValidatorAssignmentsRequest{
-		PageToken:   validatorAssignmentResponse.NextPageToken,
+	pbRequest := &ethpb.ListValidatorAssignmentsRequest{
 		PageSize:    cfgPageSize,
 		QueryFilter: &ethpb.ListValidatorAssignmentsRequest_Epoch{Epoch: eth2types.Epoch(epoch)}}
 	if epoch == 0 {
-		validatorAssignmentRequest.QueryFilter = &ethpb.ListValidatorAssignmentsRequest_Genesis{Genesis: true}
-	}
-	for {
-		validatorAssignmentRequest.PageToken = validatorAssignmentResponse.NextPageToken
-		validatorAssignmentResponse, err = pc.client.ListValidatorAssignments(context.Background(), validatorAssignmentRequest)
-
-		// pbstr, _ := json.MarshalIndent(validatorAssignmentResponse, "", "  ")
-		// fmt.Println("", string(pbstr))
-		since := time.Now()
-		SaveAssignmentsPB(epoch, validatorAssignmentResponse)
-		log.Printf("gzip encoded epoch %v took %v", epoch, time.Since(since))
-
-		// since = time.Now()
-		// dec := gob.NewDecoder(bytes.NewReader(bb.Bytes())) // Will read
-		// var out ethpb.ValidatorAssignments
-		// err = dec.Decode(&out)
-		// if err != nil {
-		// 	log.Fatal(err)
-		// }
-		// log.Printf("decoded, took %v", time.Since(since))
-
-		if err != nil {
-			return nil, fmt.Errorf("error retrieving validator assignment response for caching: %v", err)
-		}
-
-		validatorAssignmentes = append(validatorAssignmentes, validatorAssignmentResponse.Assignments...)
-		//logger.Printf("retrieved %v assignments of %v for epoch %v", len(validatorAssignmentes), validatorAssignmentResponse.TotalSize, epoch)
-
-		if validatorAssignmentResponse.NextPageToken == "" || validatorAssignmentResponse.TotalSize == 0 || len(validatorAssignmentes) == int(validatorAssignmentResponse.TotalSize) {
-			break
-		}
+		pbRequest.QueryFilter = &ethpb.ListValidatorAssignmentsRequest_Genesis{Genesis: true}
 	}
 
-	// Extract the proposer & attestation assignments from the response and cache them for later use
-	// Proposer assignments are cached by the proposer slot
-	// Attestation assignments are cached by the slot & committee key
-	for _, assignment := range validatorAssignmentes {
-		for _, slot := range assignment.ProposerSlots {
-			assignments.ProposerAssignments[uint64(slot)] = uint64(assignment.ValidatorIndex)
-		}
-
-		for memberIndex, validatorIndex := range assignment.BeaconCommittees {
-			assignments.AttestorAssignments[FormatAttestorAssignmentKey(uint64(assignment.AttesterSlot), uint64(assignment.CommitteeIndex), uint64(memberIndex))] = uint64(validatorIndex)
-		}
+	pbResponse, err := pc.client.ListValidatorAssignments(context.Background(), pbRequest)
+	if err != nil {
+		return nil, err
 	}
-
-	if len(assignments.AttestorAssignments) > 0 && len(assignments.ProposerAssignments) > 0 {
-		pc.assignmentsCache.Add(epoch, assignments)
+	if pbResponse.NextPageToken != "" {
+		return nil, errors.New("consider increasing page size")
 	}
-
-	logger.Infof("cached assignements for epoch %v took %v", epoch, time.Since(start))
-
-	// if len(assignments.ProposerAssignments) > 0 && len(assignments.AttestorAssignments) > 0 {
-	// 	now := time.Now()
-	// 	SaveAssignmentsMaps(epoch, assignments)
-	// 	fmt.Printf("Saved assignments of epoch %d: %v proposers, %v keys; encoding took %v\n",
-	// 		epoch, len(assignments.ProposerAssignments), len(assignments.AttestorAssignments),
-	// 		time.Since(now))
-	// }
-
-	return assignments, nil
+	// SaveAssignmentsPB(epoch, pbResponse) // temp
+	out := NewAssignmentsFromPB(epoch, pbResponse)
+	if len(out.Assignments) > 0 {
+		SaveAssignments(epoch, out)
+		pc.assignmentsCache.Add(epoch, out)
+	}
+	logger.Infof("cached assignments for epoch %v took %v", epoch, time.Since(start))
+	return out, err
 }
 
 // GetEpochData will get the epoch data from a Prysm client
@@ -310,11 +268,12 @@ func (pc *PrysmClient) GetEpochData(epoch uint64) (*types.EpochData, error) {
 	validatorBalances31d, err := pc.GetBalancesForEpoch(epoch31d)
 	logger.Printf("retrieved data for %v validator balances for 31d epoch %v took %v", len(validatorBalances), epoch31d, time.Since(start))
 
-	data.ValidatorAssignmentes, err = pc.GetEpochAssignments(epoch)
+	start = time.Now()
+	data.ValidatorAssignments, err = pc.GetEpochAssignments(epoch)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving assignments for epoch %v: %v", epoch, err)
 	}
-	logger.Printf("retrieved validator assignment data for epoch %v", epoch)
+	logger.Printf("retrieved validator assignment data for epoch %v took %v", epoch, time.Since(start))
 
 	// Retrieve all blocks for the epoch
 	data.Blocks = make(map[uint64]map[string]*types.Block)
@@ -336,14 +295,15 @@ func (pc *PrysmClient) GetEpochData(epoch uint64) (*types.EpochData, error) {
 	logger.Printf("retrieved %v blocks for epoch %v", len(data.Blocks), epoch)
 
 	// Fill up missed and scheduled blocks
-	for slot, proposer := range data.ValidatorAssignmentes.ProposerAssignments {
+	for slotIndex, a := range data.ValidatorAssignments.Assignments {
+		slot := data.ValidatorAssignments.FirstSlot + uint64(slotIndex)
 		_, found := data.Blocks[slot]
 		if !found {
 			// Proposer was assigned but did not yet propose a block
 			data.Blocks[slot] = make(map[string]*types.Block)
 			data.Blocks[slot]["0x0"] = &types.Block{
 				Status:            0,
-				Proposer:          proposer,
+				Proposer:          a.Proposer,
 				BlockRoot:         []byte{0x0},
 				Slot:              slot,
 				ParentRoot:        []byte{},
@@ -449,7 +409,7 @@ func (pc *PrysmClient) GetBalancesForEpoch(epoch int64) (map[uint64]uint64, erro
 			for _, v := range r {
 				sum = sum + v
 			}
-			fmt.Printf("Loaded epoch %d totals %v\n", epoch, sum)
+			logger.Printf("loaded epoch %d total balances %v\n", epoch, sum)
 		}
 		return r, err
 	}
@@ -491,7 +451,7 @@ func (pc *PrysmClient) GetBalancesForEpoch(epoch int64) (map[uint64]uint64, erro
 		for _, v := range validatorBalances {
 			sum = sum + v
 		}
-		fmt.Printf("Saved epoch %d totals: %v\n", epoch, sum)
+		logger.Printf("Saved epoch %d totals: %v\n", epoch, sum)
 		SaveBalances(epoch, validatorBalances)
 	}
 	return validatorBalances, err
@@ -681,7 +641,7 @@ func (pc *PrysmClient) parseRpcBlock(block *ethpb.BeaconBlockContainer) (*types.
 		a.Attesters = make([]uint64, 0)
 		for i := uint64(0); i < aggregationBits.Len(); i++ {
 			if aggregationBits.BitAt(i) {
-				validator, found := assignments.AttestorAssignments[FormatAttestorAssignmentKey(a.Data.Slot, a.Data.CommitteeIndex, i)]
+				validator, found := assignments.ValidatorAt(a.Data.Slot, a.Data.CommitteeIndex, i)
 				if !found { // This should never happen!
 					validator = 0
 					logger.Errorf("error retrieving assigned validator for attestation %v of block %v for slot %v committee index %v member index %v", i, b.Slot, a.Data.Slot, a.Data.CommitteeIndex, i)

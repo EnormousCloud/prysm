@@ -15,4 +15,4 @@ WORKDIR /app
 VOLUME /cache
 COPY --from=0 /app/bin/cacher /app/cacher
 ADD .env /app/.env
-CMD /app/cacher
+ENTRYPOINT ["/app/cacher"]

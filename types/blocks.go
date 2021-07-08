@@ -24,7 +24,7 @@ type ChainHead struct {
 type EpochData struct {
 	Epoch                   uint64
 	Validators              []*Validator
-	ValidatorAssignmentes   *EpochAssignments
+	ValidatorAssignments    *Assignments
 	Blocks                  map[uint64]map[string]*Block
 	EpochParticipationStats *ValidatorParticipation
 }
@@ -190,8 +190,24 @@ type BlockComparisonContainer struct {
 	Node  *MinimalBlock
 }
 
-// EpochAssignments is a struct to hold epoch assignment data
-type EpochAssignments struct {
-	ProposerAssignments map[uint64]uint64
-	AttestorAssignments map[string]uint64
+type AssignmentSlot struct {
+	Proposer   uint64
+	Committees [][]uint64
+}
+
+type Assignments struct {
+	// Number of epoch
+	Epoch uint32
+	// typically 32
+	NumSlots uint32
+	// First slot in the epoch
+	FirstSlot uint64
+	// total assignments - helps in memory pre-allocation
+	NumAssignments uint64
+	// array of committees
+	Assignments []AssignmentSlot
+}
+
+func (a *Assignments) ValidatorAt(slot uint64, committee uint64, index uint64) (uint64, bool) {
+	return a.Assignments[slot-a.FirstSlot].Committees[committee][index], true
 }

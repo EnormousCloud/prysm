@@ -1,12 +1,12 @@
 package rpc
 
 import (
-	"bytes"
-	"encoding/binary"
-	"encoding/gob"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"time"
 
+	"github.com/golang/protobuf/proto"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 )
 
@@ -30,23 +30,34 @@ func HasAssignmentsPB(epoch uint64) bool {
 	return true
 }
 
+func LoadAssignmentsPB(epoch uint64) (*ethpb.ValidatorAssignments, error) {
+	start := time.Now()
+	data, err := ioutil.ReadFile(FnAssignmentsPB(epoch))
+	if err != nil {
+		return nil, err
+	}
+	var message ethpb.ValidatorAssignments
+	err = proto.Unmarshal(data, &message)
+	if err != nil {
+		return nil, err
+	}
+	logassignments.Printf("loading from PB took %v", time.Since(start))
+	return &message, nil
+}
+
 func SaveAssignmentsPB(epoch uint64, src *ethpb.ValidatorAssignments) error {
+	start := time.Now()
 	if src == nil || epoch <= 0 {
 		return nil
 	}
-
-	var bb bytes.Buffer        // Stand-in for a network connection
-	enc := gob.NewEncoder(&bb) // Will write to network.
-	err := enc.Encode(*src)
+	data, err := proto.Marshal(src)
+	if err != nil {
+		return fmt.Errorf("cannot marshal proto message to binary: %w", err)
+	}
+	err = ioutil.WriteFile(FnAssignmentsPB(epoch), data, 0666)
 	if err != nil {
 		return err
 	}
-
-	file, err := os.Create(FnAssignmentsPB(epoch))
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	return binary.Write(file, binary.LittleEndian, bb.Bytes())
+	logassignments.Printf("saving PB took %v", time.Since(start))
+	return err
 }
