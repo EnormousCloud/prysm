@@ -3,7 +3,6 @@ package rpc
 import (
 	"beaconchain/types"
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -190,30 +189,28 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.Assignments, er
 	if HasAssignments(epoch) {
 		out, err := LoadAssignments(epoch)
 		if err == nil {
-			logger.Printf("Loaded epoch %d assignments, %v slots %v assignments\n",
+			logger.Printf("loaded epoch %d cached assignments, %v slots %v assignments\n",
 				epoch, len(out.Assignments), out.NumAssignments)
 			pc.assignmentsCache.Add(epoch, out)
 			return out, nil
 		} else {
 			logger.Println("LoadAssignments failure", err)
 		}
-	} else if HasAssignmentsPB(epoch) {
-		pb, err := LoadAssignmentsPB(epoch)
-		if err == nil {
-			out := NewAssignmentsFromPB(epoch, pb)
-			logger.Printf("Loaded epoch %d assignments from PB, %v slots %v assignments\n",
-				epoch, len(out.Assignments), out.NumAssignments)
-			pc.assignmentsCache.Add(epoch, out)
-			return out, nil
-		} else {
-			logger.Println("LoadAssignmentsPB failure", err)
-		}
+		// } else if HasAssignmentsPB(epoch) {
+		// pb, err := LoadAssignmentsPB(epoch, "")
+		// if err == nil {
+		// 	out := NewAssignmentsFromPB(epoch, pb)
+		// 	logger.Printf("loaded epoch %d cached assignments from PB, %v slots %v assignments\n",
+		// 		epoch, len(out.Assignments), out.NumAssignments)
+		// 	pc.assignmentsCache.Add(epoch, out)
+		// 	return out, nil
+		// } else {
+		// 	logger.Println("LoadAssignmentsPB failure", err)
+		// }
 	}
 
 	logger.Infof("caching assignments for epoch %v", epoch)
 	start := time.Now()
-
-	// Retrieve the validator assignments for the epoch
 	pbRequest := &ethpb.ListValidatorAssignmentsRequest{
 		PageSize:    cfgPageSize,
 		QueryFilter: &ethpb.ListValidatorAssignmentsRequest_Epoch{Epoch: eth2types.Epoch(epoch)}}
@@ -221,20 +218,29 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.Assignments, er
 		pbRequest.QueryFilter = &ethpb.ListValidatorAssignmentsRequest_Genesis{Genesis: true}
 	}
 
-	pbResponse, err := pc.client.ListValidatorAssignments(context.Background(), pbRequest)
-	if err != nil {
-		return nil, err
+	numRequests := 1
+	chunks := make([]*ethpb.ValidatorAssignments, 0)
+	for {
+		// Retrieve the validator assignments for the epoch
+		pbResponse, err := pc.client.ListValidatorAssignments(context.Background(), pbRequest)
+		if err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, pbResponse)
+		if pbResponse.NextPageToken == "" {
+			break
+		}
+		pbRequest.PageToken = pbResponse.NextPageToken
+		numRequests++
 	}
-	if pbResponse.NextPageToken != "" {
-		return nil, errors.New("consider increasing page size")
-	}
+
+	out := NewAssignmentsFromPB(epoch, chunks)
 	// SaveAssignmentsPB(epoch, pbResponse) // temp
-	out := NewAssignmentsFromPB(epoch, pbResponse)
 	if len(out.Assignments) > 0 {
 		SaveAssignments(epoch, out)
 		pc.assignmentsCache.Add(epoch, out)
 	}
-	logger.Infof("cached assignments for epoch %v took %v", epoch, time.Since(start))
+	logger.Infof("cached assignments for epoch %v, %d requests took %v ", epoch, numRequests, time.Since(start))
 	return out, err
 }
 
@@ -451,7 +457,7 @@ func (pc *PrysmClient) GetBalancesForEpoch(epoch int64) (map[uint64]uint64, erro
 		for _, v := range validatorBalances {
 			sum = sum + v
 		}
-		logger.Printf("Saved epoch %d totals: %v\n", epoch, sum)
+		logger.Printf("saved epoch %d totals: %v for %d validators\n", epoch, sum, len(validatorBalances))
 		SaveBalances(epoch, validatorBalances)
 	}
 	return validatorBalances, err

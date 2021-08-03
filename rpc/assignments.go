@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"time"
 
@@ -39,39 +40,44 @@ func HasAssignments(epoch uint64) bool {
 	return true
 }
 
-func NewAssignmentsFromPB(epoch uint64, src *ethpb.ValidatorAssignments) *types.Assignments {
+func NewAssignmentsFromPB(epoch uint64, src []*ethpb.ValidatorAssignments) *types.Assignments {
 	since := time.Now()
 	proposers := map[uint64]uint64{}
 	slotsz := map[uint64]uint64{}
 	firstSlot := uint64(0)
 
+	numAssignments := 0
 	// loop 1 - define sizes for allocations
-	for i := 0; i < len(src.Assignments); i++ {
-		assignment := src.Assignments[i]
+	for ai := 0; ai < len(src); ai++ {
+		numAssignments += len(src[ai].Assignments)
+		log.Printf("%d assignments batch", len(src[ai].Assignments))
+		for i := 0; i < len(src[ai].Assignments); i++ {
+			assignment := src[ai].Assignments[i]
 
-		if len(assignment.ProposerSlots) > 0 {
-			slot := uint64(assignment.ProposerSlots[0])
+			if len(assignment.ProposerSlots) > 0 {
+				slot := uint64(assignment.ProposerSlots[0])
+				if slot < firstSlot || firstSlot == 0 {
+					firstSlot = slot
+				}
+				proposer := uint64(assignment.ValidatorIndex)
+				proposers[uint64(slot)] = proposer
+				// log.Printf("%d ProposerSlots: %v %v", i, slot, proposer)
+			}
+			slot := uint64(assignment.AttesterSlot)
 			if slot < firstSlot || firstSlot == 0 {
 				firstSlot = slot
 			}
-			proposer := uint64(assignment.ValidatorIndex)
-			proposers[uint64(slot)] = proposer
-			// log.Printf("%d ProposerSlots: %v %v", i, slot, proposer)
-		}
-		slot := uint64(assignment.AttesterSlot)
-		if slot < firstSlot || firstSlot == 0 {
-			firstSlot = slot
-		}
 
-		if val, ok := slotsz[slot]; ok {
-			if val < uint64(assignment.CommitteeIndex) {
+			if val, ok := slotsz[slot]; ok {
+				if val < uint64(assignment.CommitteeIndex) {
+					slotsz[slot] = uint64(assignment.CommitteeIndex)
+				}
+			} else {
 				slotsz[slot] = uint64(assignment.CommitteeIndex)
 			}
-		} else {
-			slotsz[slot] = uint64(assignment.CommitteeIndex)
 		}
+		// fmt.Printf("slotsz %v proposers: %v\n", slotsz, proposers)
 	}
-	// fmt.Printf("slotsz %v proposers: %v", slotsz, proposers)
 	// step 2 - allocation
 	assignments := make([]types.AssignmentSlot, uint32(len(slotsz)))
 	for slot, maxCommitteeIndex := range slotsz {
@@ -82,25 +88,27 @@ func NewAssignmentsFromPB(epoch uint64, src *ethpb.ValidatorAssignments) *types.
 		}
 	}
 
-	for i := 0; i < len(src.Assignments); i++ {
-		assignment := src.Assignments[i]
-		slotIndex := uint64(assignment.AttesterSlot) - firstSlot
-		m := make([]uint64, len(assignment.BeaconCommittees))
-		for k := 0; k < len(assignment.BeaconCommittees); k++ {
-			m[k] = uint64(assignment.BeaconCommittees[k])
+	for ai := 0; ai < len(src); ai++ {
+		for i := 0; i < len(src[ai].Assignments); i++ {
+			assignment := src[ai].Assignments[i]
+			slotIndex := uint64(assignment.AttesterSlot) - firstSlot
+			m := make([]uint64, len(assignment.BeaconCommittees))
+			for k := 0; k < len(assignment.BeaconCommittees); k++ {
+				m[k] = uint64(assignment.BeaconCommittees[k])
+			}
+			assignments[slotIndex].Committees[assignment.CommitteeIndex] = m
 		}
-		assignments[slotIndex].Committees[assignment.CommitteeIndex] = m
 	}
 
-	logassignments.Printf("encoding from PB for epoch %v starting from slot %v took %v",
-		epoch, firstSlot, time.Since(since))
+	logassignments.Printf("encoding %v assignements from PB for epoch %v starting from slot %v took %v\n",
+		numAssignments, epoch, firstSlot, time.Since(since))
 	// log.Printf("max committee index: %v", assignments)
 
 	return &types.Assignments{
 		Epoch:          uint32(epoch),
 		FirstSlot:      firstSlot,
 		NumSlots:       uint32(len(proposers)),
-		NumAssignments: uint64(len(src.Assignments)),
+		NumAssignments: uint64(numAssignments),
 		Assignments:    assignments,
 	}
 }

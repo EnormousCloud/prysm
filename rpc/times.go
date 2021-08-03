@@ -2,7 +2,7 @@ package rpc
 
 import "time"
 
-const cfgPageSize = 200000
+const cfgPageSize = 50000
 const cfgSlotsPerEpoch = 32
 const cfgSecondsPerSlot = 12
 const cfgGenesisTimestamp = 1573489682

@@ -10,12 +10,15 @@ import (
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 )
 
-func FnAssignmentsPB(epoch uint64) string {
+func FnAssignmentsPB(epoch uint64, pageToken string) string {
+	if len(pageToken) > 0 {
+		return fmt.Sprintf("/cache/%d-%s.assign.pb", epoch, pageToken)
+	}
 	return fmt.Sprintf("/cache/%d.assign.pb", epoch)
 }
 
 func HasAssignmentsPB(epoch uint64) bool {
-	file, err := os.Open(FnAssignmentsPB(epoch))
+	file, err := os.Open(FnAssignmentsPB(epoch, ""))
 	if err != nil {
 		return false
 	}
@@ -30,9 +33,9 @@ func HasAssignmentsPB(epoch uint64) bool {
 	return true
 }
 
-func LoadAssignmentsPB(epoch uint64) (*ethpb.ValidatorAssignments, error) {
+func LoadAssignmentsPB(epoch uint64, pageToken string) (*ethpb.ValidatorAssignments, error) {
 	start := time.Now()
-	data, err := ioutil.ReadFile(FnAssignmentsPB(epoch))
+	data, err := ioutil.ReadFile(FnAssignmentsPB(epoch, pageToken))
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +48,7 @@ func LoadAssignmentsPB(epoch uint64) (*ethpb.ValidatorAssignments, error) {
 	return &message, nil
 }
 
-func SaveAssignmentsPB(epoch uint64, src *ethpb.ValidatorAssignments) error {
+func SaveAssignmentsPB(epoch uint64, src *ethpb.ValidatorAssignments, pageToken string) error {
 	start := time.Now()
 	if src == nil || epoch <= 0 {
 		return nil
@@ -54,7 +57,7 @@ func SaveAssignmentsPB(epoch uint64, src *ethpb.ValidatorAssignments) error {
 	if err != nil {
 		return fmt.Errorf("cannot marshal proto message to binary: %w", err)
 	}
-	err = ioutil.WriteFile(FnAssignmentsPB(epoch), data, 0666)
+	err = ioutil.WriteFile(FnAssignmentsPB(epoch, pageToken), data, 0666)
 	if err != nil {
 		return err
 	}
