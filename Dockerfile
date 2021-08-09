@@ -15,4 +15,6 @@ WORKDIR /app
 VOLUME /cache
 COPY --from=0 /app/bin/cacher /app/cacher
 ADD .env /app/.env
-ENTRYPOINT ["/app/cacher"]
+
+# default script will try only to watch the head
+CMD ["sh", "-c", "while true; do /app/cacher -timeout 3 -limit 2500; done"]

@@ -60,6 +60,7 @@ var hosts = flag.String("hosts", "localhost:4000", "comma-separated list of host
 var gethead = flag.Bool("get-head", false, "return head of")
 var head = flag.Int("head", 0, "block to start reading")
 var limit = flag.Int("limit", 1000, "max number of epochs to look at")
+var timeout = flag.Int("timeout", 0, "time period, in minutes (watching head only). If takes less, process will wait for this period after job is done")
 var debug = flag.Bool("debug", false, "do some debugging instead of the job")
 var inc = flag.Bool("inc", false, "do through epochs incrementally")
 
@@ -134,6 +135,7 @@ func main() {
 	}
 	i := 0
 	failures := map[uint64]int{}
+	since := time.Now()
 	for {
 		start := time.Now()
 		cont := false
@@ -179,12 +181,12 @@ func main() {
 		if cont {
 			continue
 		}
-		logger.Printf("epoch %d took %v \n", epoch, time.Since(start))
+		logger.Printf("epoch %d took %v", epoch, time.Since(start))
 
 		i++
 		nextEpoch := int(headEpoch) + sign*i
 		if sign > 0 {
-			logger.Printf("epoch %d took %v, est head %v \n", epoch, time.Since(start), estHeadEpoch)
+			logger.Printf("epoch %d took %v, est head %v", epoch, time.Since(start), estHeadEpoch)
 			if i >= *limit || nextEpoch > estHeadEpoch {
 				break
 			}
@@ -192,6 +194,24 @@ func main() {
 			if i >= *limit || nextEpoch == 0 {
 				break
 			}
+		}
+
+		if timeout != nil && *timeout > 0 {
+			dur := time.Now().Sub(since)
+			maxDuration := time.Duration(*timeout) * time.Minute
+			if dur >= maxDuration {
+				logger.Printf("this takes more than %v, EXITING", maxDuration)
+				os.Exit(0)
+			}
+		}
+	}
+
+	if timeout != nil && *timeout > 0 {
+		dur := time.Now().Sub(since)
+		maxDuration := time.Duration(*timeout) * time.Minute
+		if dur < maxDuration {
+			logger.Printf("sleeping for %v", maxDuration-dur)
+			time.Sleep(maxDuration - dur)
 		}
 	}
 }

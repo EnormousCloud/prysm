@@ -10,9 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
-	"time"
 
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	"github.com/sirupsen/logrus"
@@ -41,7 +39,7 @@ func HasAssignments(epoch uint64) bool {
 }
 
 func NewAssignmentsFromPB(epoch uint64, src []*ethpb.ValidatorAssignments) *types.Assignments {
-	since := time.Now()
+	// since := time.Now()
 	proposers := map[uint64]uint64{}
 	slotsz := map[uint64]uint64{}
 	firstSlot := uint64(0)
@@ -50,7 +48,7 @@ func NewAssignmentsFromPB(epoch uint64, src []*ethpb.ValidatorAssignments) *type
 	// loop 1 - define sizes for allocations
 	for ai := 0; ai < len(src); ai++ {
 		numAssignments += len(src[ai].Assignments)
-		log.Printf("%d assignments batch", len(src[ai].Assignments))
+		// log.Printf("%d assignments batch", len(src[ai].Assignments))
 		for i := 0; i < len(src[ai].Assignments); i++ {
 			assignment := src[ai].Assignments[i]
 
@@ -76,7 +74,7 @@ func NewAssignmentsFromPB(epoch uint64, src []*ethpb.ValidatorAssignments) *type
 				slotsz[slot] = uint64(assignment.CommitteeIndex)
 			}
 		}
-		// fmt.Printf("slotsz %v proposers: %v\n", slotsz, proposers)
+		// fmt.Printf("slotsz %v proposers: %v", slotsz, proposers)
 	}
 	// step 2 - allocation
 	assignments := make([]types.AssignmentSlot, uint32(len(slotsz)))
@@ -100,9 +98,8 @@ func NewAssignmentsFromPB(epoch uint64, src []*ethpb.ValidatorAssignments) *type
 		}
 	}
 
-	logassignments.Printf("encoding %v assignements from PB for epoch %v starting from slot %v took %v\n",
-		numAssignments, epoch, firstSlot, time.Since(since))
-	// log.Printf("max committee index: %v", assignments)
+	// logassignments.Printf("encoding %v assignments from PB for epoch %v starting from slot %v took %v",
+	// numAssignments, epoch, firstSlot, time.Since(since))
 
 	return &types.Assignments{
 		Epoch:          uint32(epoch),

@@ -189,18 +189,18 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.Assignments, er
 	if HasAssignments(epoch) {
 		out, err := LoadAssignments(epoch)
 		if err == nil {
-			logger.Printf("loaded epoch %d cached assignments, %v slots %v assignments\n",
+			logger.Debugf("loaded epoch %d cached assignments, %v slots %v assignments",
 				epoch, len(out.Assignments), out.NumAssignments)
 			pc.assignmentsCache.Add(epoch, out)
 			return out, nil
 		} else {
-			logger.Println("LoadAssignments failure", err)
+			logger.Errorf("LoadAssignments failure", err)
 		}
 		// } else if HasAssignmentsPB(epoch) {
 		// pb, err := LoadAssignmentsPB(epoch, "")
 		// if err == nil {
 		// 	out := NewAssignmentsFromPB(epoch, pb)
-		// 	logger.Printf("loaded epoch %d cached assignments from PB, %v slots %v assignments\n",
+		// 	logger.Printf("loaded epoch %d cached assignments from PB, %v slots %v assignments",
 		// 		epoch, len(out.Assignments), out.NumAssignments)
 		// 	pc.assignmentsCache.Add(epoch, out)
 		// 	return out, nil
@@ -209,7 +209,7 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.Assignments, er
 		// }
 	}
 
-	logger.Infof("caching assignments for epoch %v", epoch)
+	logger.Infof("caching assignments for epoch %v started", epoch)
 	start := time.Now()
 	pbRequest := &ethpb.ListValidatorAssignmentsRequest{
 		PageSize:    cfgPageSize,
@@ -240,7 +240,7 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.Assignments, er
 		SaveAssignments(epoch, out)
 		pc.assignmentsCache.Add(epoch, out)
 	}
-	logger.Infof("cached assignments for epoch %v, %d requests took %v ", epoch, numRequests, time.Since(start))
+	logger.Infof("== %d REQUESTS for assignments for epoch %v took %v ", numRequests, epoch, time.Since(start))
 	return out, err
 }
 
@@ -415,7 +415,7 @@ func (pc *PrysmClient) GetBalancesForEpoch(epoch int64) (map[uint64]uint64, erro
 			for _, v := range r {
 				sum = sum + v
 			}
-			logger.Printf("loaded epoch %d total balances %v\n", epoch, sum)
+			logger.Debugf("loaded epoch %d total balances %v", epoch, sum)
 		}
 		return r, err
 	}
@@ -457,7 +457,7 @@ func (pc *PrysmClient) GetBalancesForEpoch(epoch int64) (map[uint64]uint64, erro
 		for _, v := range validatorBalances {
 			sum = sum + v
 		}
-		logger.Printf("saved epoch %d totals: %v for %d validators\n", epoch, sum, len(validatorBalances))
+		logger.Debugf("saved epoch %d totals: %v for %d validators\n", epoch, sum, len(validatorBalances))
 		SaveBalances(epoch, validatorBalances)
 	}
 	return validatorBalances, err
