@@ -63,6 +63,45 @@ type Validator struct {
 	Status            string `db:"status"`
 }
 
+// ValidatorF is a cachable fixed size struct to hold validator data
+type ValidatorF struct {
+	Index                      uint64   `db:"validatorindex" json:"i"`
+	PublicKey                  [48]byte `db:"pubkey" json:"pk"`
+	Balance                    uint64   `db:"balance" json:"b"`
+	EffectiveBalance           uint64   `db:"effectivebalance" json:"eb"`
+	Slashed                    bool     `db:"slashed" json:"slashed"`
+	ActivationEligibilityEpoch uint64   `db:"activationeligibilityepoch" json:"aee"`
+	ActivationEpoch            uint64   `db:"activationepoch" json:"ae"`
+	ExitEpoch                  uint64   `db:"exitepoch" json:"x"`
+	WithdrawableEpoch          uint64   `db:"withdrawableepoch" json:"w"`
+	WithdrawalCredentials      [32]byte `db:"withdrawalcredentials" json:"wc"`
+	BalanceActivation          uint64   `db:"balanceactivation" json:"ba"`
+	Balance1d                  uint64   `db:"balance1d" json:"b1"`
+	Balance7d                  uint64   `db:"balance7d" json:"b7"`
+	Balance31d                 uint64   `db:"balance31d" json:"b32"`
+}
+
+func (src *ValidatorF) ToValidator() *Validator {
+	res := &Validator{
+		Index:                      src.Index,
+		Balance:                    src.Balance,
+		EffectiveBalance:           src.EffectiveBalance,
+		Slashed:                    src.Slashed,
+		ActivationEligibilityEpoch: src.ActivationEligibilityEpoch,
+		ActivationEpoch:            src.ActivationEpoch,
+		ExitEpoch:                  src.ExitEpoch,
+		WithdrawableEpoch:          src.WithdrawableEpoch,
+		BalanceActivation:          src.BalanceActivation,
+		Balance1d:                  src.Balance1d,
+		Balance7d:                  src.Balance7d,
+		Balance31d:                 src.Balance31d,
+		Status:                     "",
+	}
+	copy(res.PublicKey, src.PublicKey[:])
+	copy(res.WithdrawalCredentials, src.WithdrawalCredentials[:])
+	return res
+}
+
 // ValidatorQueue is a struct to hold validator queue data
 type ValidatorQueue struct {
 	ChurnLimit                 uint64

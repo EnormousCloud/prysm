@@ -17,4 +17,4 @@ COPY --from=0 /app/bin/cacher /app/cacher
 ADD .env /app/.env
 
 # default script will try only to watch the head
-CMD ["sh", "-c", "while true; do /app/cacher -timeout 3 -limit 2500; done"]
+CMD ["sh", "-c", "while true; do /app/cacher -timeout 3 -offset 1 -limit 50; done"]

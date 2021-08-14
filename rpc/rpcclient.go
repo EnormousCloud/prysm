@@ -244,37 +244,125 @@ func (pc *PrysmClient) GetEpochAssignments(epoch uint64) (*types.Assignments, er
 	return out, err
 }
 
-// GetEpochData will get the epoch data from a Prysm client
-func (pc *PrysmClient) GetEpochData(epoch uint64) (*types.EpochData, error) {
-	var err error
+func (pc *PrysmClient) GetEpochValidators(epoch uint64) ([]*types.Validator, error) {
+	out := make([]*types.Validator, 0)
 
-	data := &types.EpochData{}
-	data.Epoch = epoch
+	if HasValidators(epoch) {
+		res, err := LoadValidators(epoch)
+		if err == nil {
+			for _, v := range res {
+				out = append(out, v.ToValidator())
+			}
+			return out, nil
+		}
+	}
 
-	// Retrieve the validator balances for the requested epoch
+	cached := make([]types.ValidatorF, 0)
+
+	since := time.Now()
 	start := time.Now()
 	validatorBalances, err := pc.GetBalancesForEpoch(int64(epoch))
+	if err != nil {
+		return nil, err
+	}
 	logger.Printf("retrieved data for %v validator balances for epoch %v took %v", len(validatorBalances), epoch, time.Since(start))
 
 	// Retrieve the validator balances for the n-1d epoch
 	start = time.Now()
 	epoch1d := int64(epoch) - 225
 	validatorBalances1d, err := pc.GetBalancesForEpoch(epoch1d)
+	if err != nil {
+		return nil, err
+	}
 	logger.Printf("retrieved data for %v validator balances for 1d epoch %v took %v", len(validatorBalances), epoch1d, time.Since(start))
 
 	// Retrieve the validator balances for the n-7d epoch
 	start = time.Now()
 	epoch7d := int64(epoch) - 225*7
 	validatorBalances7d, err := pc.GetBalancesForEpoch(epoch7d)
+	if err != nil {
+		return nil, err
+	}
 	logger.Printf("retrieved data for %v validator balances for 7d epoch %v took %v", len(validatorBalances), epoch7d, time.Since(start))
 
 	// Retrieve the validator balances for the n-7d epoch
 	start = time.Now()
 	epoch31d := int64(epoch) - 225*31
 	validatorBalances31d, err := pc.GetBalancesForEpoch(epoch31d)
+	if err != nil {
+		return nil, err
+	}
 	logger.Printf("retrieved data for %v validator balances for 31d epoch %v took %v", len(validatorBalances), epoch31d, time.Since(start))
 
-	start = time.Now()
+	validatorResponse := &ethpb.Validators{}
+	validatorRequest := &ethpb.ListValidatorsRequest{
+		PageToken:   validatorResponse.NextPageToken,
+		PageSize:    cfgPageSize,
+		QueryFilter: &ethpb.ListValidatorsRequest_Epoch{Epoch: eth2types.Epoch(epoch)}}
+	if epoch == 0 {
+		validatorRequest.QueryFilter = &ethpb.ListValidatorsRequest_Genesis{Genesis: true}
+	}
+	for {
+		validatorRequest.PageToken = validatorResponse.NextPageToken
+		validatorResponse, err = pc.client.ListValidators(context.Background(), validatorRequest)
+		if err != nil {
+			logger.Errorf("error retrieving validator response: %v", err)
+			break
+		}
+		if validatorResponse.TotalSize == 0 {
+			break
+		}
+
+		for _, validator := range validatorResponse.ValidatorList {
+			balance, exists := validatorBalances[uint64(validator.Index)]
+			if !exists {
+				logger.
+					WithField("index", validator.Index).
+					WithField("pubkey", fmt.Sprintf("%x", validator.Validator.PublicKey)).
+					WithField("epoch", epoch).
+					Errorf("error retrieving validator balance")
+				continue
+			}
+			val := types.ValidatorF{
+				Index:                      uint64(validator.Index),
+				Balance:                    balance,
+				EffectiveBalance:           validator.Validator.EffectiveBalance,
+				Slashed:                    validator.Validator.Slashed,
+				ActivationEligibilityEpoch: uint64(validator.Validator.ActivationEligibilityEpoch),
+				ActivationEpoch:            uint64(validator.Validator.ActivationEpoch),
+				ExitEpoch:                  uint64(validator.Validator.ExitEpoch),
+				WithdrawableEpoch:          uint64(validator.Validator.WithdrawableEpoch),
+			}
+			// copy(val.Status[:], "")
+			copy(val.PublicKey[:], validator.Validator.PublicKey)
+			copy(val.WithdrawalCredentials[:], validator.Validator.WithdrawalCredentials)
+			val.Balance1d = validatorBalances1d[uint64(validator.Index)]
+			val.Balance7d = validatorBalances7d[uint64(validator.Index)]
+			val.Balance31d = validatorBalances31d[uint64(validator.Index)]
+
+			out = append(out, val.ToValidator())
+			cached = append(cached, val)
+		}
+
+		if validatorResponse.NextPageToken == "" {
+			break
+		}
+	}
+
+	logger.Printf("list of %v validators for epoch %v took %v", len(out), epoch, time.Since(since))
+	SaveValidators(epoch, cached)
+	return out, nil
+}
+
+// GetEpochData will get the epoch data from a Prysm client
+func (pc *PrysmClient) GetEpochData(epoch uint64) (*types.EpochData, error) {
+	var err error
+
+	data := &types.EpochData{}
+	data.Epoch = epoch
+	// Retrieve the validator balances for the requested epoch
+
+	start := time.Now()
 	data.ValidatorAssignments, err = pc.GetEpochAssignments(epoch)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving assignments for epoch %v: %v", epoch, err)
@@ -339,58 +427,9 @@ func (pc *PrysmClient) GetEpochData(epoch uint64) (*types.EpochData, error) {
 	}
 
 	// Retrieve the validator set for the epoch
-	data.Validators = make([]*types.Validator, 0)
-	validatorResponse := &ethpb.Validators{}
-	validatorRequest := &ethpb.ListValidatorsRequest{
-		PageToken:   validatorResponse.NextPageToken,
-		PageSize:    cfgPageSize,
-		QueryFilter: &ethpb.ListValidatorsRequest_Epoch{Epoch: eth2types.Epoch(epoch)}}
-	if epoch == 0 {
-		validatorRequest.QueryFilter = &ethpb.ListValidatorsRequest_Genesis{Genesis: true}
-	}
-	for {
-		validatorRequest.PageToken = validatorResponse.NextPageToken
-		validatorResponse, err = pc.client.ListValidators(context.Background(), validatorRequest)
-		if err != nil {
-			logger.Errorf("error retrieving validator response: %v", err)
-			break
-		}
-		if validatorResponse.TotalSize == 0 {
-			break
-		}
-
-		for _, validator := range validatorResponse.ValidatorList {
-
-			balance, exists := validatorBalances[uint64(validator.Index)]
-			if !exists {
-				logger.WithField("pubkey", fmt.Sprintf("%x", validator.Validator.PublicKey)).WithField("epoch", epoch).Errorf("error retrieving validator balance")
-				continue
-			}
-
-			val := &types.Validator{
-				Index:                      uint64(validator.Index),
-				PublicKey:                  validator.Validator.PublicKey,
-				WithdrawalCredentials:      validator.Validator.WithdrawalCredentials,
-				Balance:                    balance,
-				EffectiveBalance:           validator.Validator.EffectiveBalance,
-				Slashed:                    validator.Validator.Slashed,
-				ActivationEligibilityEpoch: uint64(validator.Validator.ActivationEligibilityEpoch),
-				ActivationEpoch:            uint64(validator.Validator.ActivationEpoch),
-				ExitEpoch:                  uint64(validator.Validator.ExitEpoch),
-				WithdrawableEpoch:          uint64(validator.Validator.WithdrawableEpoch),
-			}
-
-			val.Balance1d = validatorBalances1d[uint64(validator.Index)]
-			val.Balance7d = validatorBalances7d[uint64(validator.Index)]
-			val.Balance31d = validatorBalances31d[uint64(validator.Index)]
-
-			data.Validators = append(data.Validators, val)
-
-		}
-
-		if validatorResponse.NextPageToken == "" {
-			break
-		}
+	data.Validators, err = pc.GetEpochValidators(epoch)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving validators list for epoch %v: %v", epoch, err)
 	}
 	logger.Printf("retrieved data for %v validators for epoch %v", len(data.Validators), epoch)
 

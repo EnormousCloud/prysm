@@ -42,10 +42,10 @@ func NewClients(hosts []string) (*clients, error) {
 		hosts: hosts,
 	}
 	for _, host := range hosts {
-		logger.Printf("connecting to RPC of %v\n", host)
+		logger.Printf("connecting to RPC of %v", host)
 		client, err := rpc.NewPrysmClient(host)
 		if err != nil {
-			logger.Printf("error connecting to %v: %v\n", host, err)
+			logger.Printf("error connecting to %v: %v", host, err)
 		} else {
 			s.list = append(s.list, client)
 		}
@@ -59,13 +59,15 @@ func NewClients(hosts []string) (*clients, error) {
 var hosts = flag.String("hosts", "localhost:4000", "comma-separated list of hosts to connect to")
 var gethead = flag.Bool("get-head", false, "return head of")
 var head = flag.Int("head", 0, "block to start reading")
+var offset = flag.Int("offset", 0, "in case of head, offset from the head")
 var limit = flag.Int("limit", 1000, "max number of epochs to look at")
 var timeout = flag.Int("timeout", 0, "time period, in minutes (watching head only). If takes less, process will wait for this period after job is done")
 var debug = flag.Bool("debug", false, "do some debugging instead of the job")
 var inc = flag.Bool("inc", false, "do through epochs incrementally")
 
 var cacheBalances = flag.Bool("balances", true, "cache balances")
-var cacheAssignments = flag.Bool("assignments", true, "cacne assignmenets")
+var cacheValidators = flag.Bool("validators", true, "cache validator lists")
+var cacheAssignments = flag.Bool("assignments", true, "cache assignmenets")
 
 func main() {
 	err := godotenv.Load()
@@ -133,7 +135,7 @@ func main() {
 			estHeadEpoch = int(head.HeadEpoch)
 		}
 	}
-	i := 0
+	i := *offset
 	failures := map[uint64]int{}
 	since := time.Now()
 	for {
@@ -148,7 +150,25 @@ func main() {
 					failures[epoch] = 0
 				}
 				failures[epoch] += 1
-				logger.Printf("epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
+				logger.Printf("[balances] epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
+				if failures[epoch] < clients.Len() {
+					// try again on other server, otherwise skip
+					clients.Next()
+				} else {
+					i++            // all hosts were requested, just skip to the next epoch
+					clients.Next() // switch anyway to a better server
+				}
+				cont = true
+			}
+		}
+		if *cacheValidators {
+			_, err := clients.Get().GetEpochValidators(uint64(epoch))
+			if err != nil {
+				if _, ok := failures[epoch]; !ok {
+					failures[epoch] = 0
+				}
+				failures[epoch] += 1
+				logger.Printf("[validators] epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
 				if failures[epoch] < clients.Len() {
 					// try again on other server, otherwise skip
 					clients.Next()
@@ -167,7 +187,7 @@ func main() {
 					failures[epoch] = 0
 				}
 				failures[epoch] += 1
-				logger.Printf("epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
+				logger.Printf("[assignment] epoch %d error: %v, took %v\n", epoch, err, time.Since(start))
 				if failures[epoch] < clients.Len() {
 					// try again on other server, otherwise skip
 					clients.Next()
